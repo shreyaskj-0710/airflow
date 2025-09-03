@@ -38,7 +38,7 @@ from sqlalchemy import (
     func,
     select,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError,OperationalError
 from sqlalchemy.orm import relationship, validates
 from sqlalchemy_jsonfield import JSONField
 
@@ -50,6 +50,7 @@ from airflow.utils.session import create_session
 from airflow.utils.sqlalchemy import UtcDateTime, nulls_first, with_row_locks
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
+import time
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -438,6 +439,39 @@ def _handle_clear_run(session, dag, dr, info, backfill_id, sort_ordinal, run_on_
         )
     )
 
+def retry_transaction_backfill(dagrun_info_list,dag,br,run_on_latest_version,session,skip_transactions=0):
+    try:
+        for backfill_sort_ordinal, info in enumerate(dagrun_info_list, start=1):
+
+            if backfill_sort_ordinal and backfill_sort_ordinal<=skip_transactions:
+                continue
+
+            _create_backfill_dag_run(
+                dag=dag,
+                info=info,
+                backfill_id=br.id,
+                dag_run_conf=br.dag_run_conf,
+                reprocess_behavior=br.reprocess_behavior,
+                backfill_sort_ordinal=backfill_sort_ordinal,
+                triggering_user_name=br.triggering_user_name,
+                run_on_latest_version=run_on_latest_version,
+                session=session,
+            )
+            log.info(
+                "created backfill dag run dag_id=%s backfill_id=%s, info=%s",
+                dag.dag_id,
+                br.id,
+                info,
+            ) 
+
+    except OperationalError as e:
+        log.info(f"Operational error occurred while processing backfill, retyring again starting from ordinal {backfill_sort_ordinal}")
+
+        #wait time for transaction lock
+        time.sleep(0.5)
+
+        retry_transaction_backfill(dagrun_info_list,dag,br,run_on_latest_version,session,backfill_sort_ordinal)
+    
 
 def _create_backfill(
     *,
@@ -504,22 +538,6 @@ def _create_backfill(
         if not dag_model:
             raise RuntimeError(f"Dag {dag_id} not found")
 
-        for backfill_sort_ordinal, info in enumerate(dagrun_info_list, start=1):
-            _create_backfill_dag_run(
-                dag=dag,
-                info=info,
-                backfill_id=br.id,
-                dag_run_conf=br.dag_run_conf,
-                reprocess_behavior=br.reprocess_behavior,
-                backfill_sort_ordinal=backfill_sort_ordinal,
-                triggering_user_name=br.triggering_user_name,
-                run_on_latest_version=run_on_latest_version,
-                session=session,
-            )
-            log.info(
-                "created backfill dag run dag_id=%s backfill_id=%s, info=%s",
-                dag.dag_id,
-                br.id,
-                info,
-            )
+        retry_transaction_backfill(dagrun_info_list,dag,br,run_on_latest_version,session,0)
+
     return br
