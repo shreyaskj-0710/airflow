@@ -2118,6 +2118,9 @@ class Airflow(AirflowBaseView):
         ui_fields_defined = any("const" not in f["schema"] for f in form_fields.values())
         show_trigger_form_if_no_params = conf.getboolean("webserver", "show_trigger_form_if_no_params")
 
+        if form_fields.get("object_param") and form_fields["object_param"].get("value") is None:
+            form_fields["object_param"]["value"] = {}
+
         if not dag_orm:
             flash(f"Cannot find dag {dag_id}")
             return redirect(origin)
